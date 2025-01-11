@@ -1,29 +1,27 @@
 '''
-Simple example pokerbot, written in Python.
+6.9630 MIT POKERBOTS GAME ENGINE
+DO NOT REMOVE, RENAME, OR EDIT THIS FILE
 '''
-from skeleton.actions import FoldAction, CallAction, CheckAction, RaiseAction
-from skeleton.states import GameState, TerminalState, RoundState
-from skeleton.states import NUM_ROUNDS, STARTING_STACK, BIG_BLIND, SMALL_BLIND
-from skeleton.bot import Bot
-from skeleton.runner import parse_args, run_bot
-
-import math
+import sys
+import os
 import random
+import math
 
 import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
-from cfr_training.neural_net import DeepCFRModel
+
+sys.path.append(os.getcwd())
+from config import *
+from engine import FoldAction, CallAction, CheckAction, RaiseAction
+from training.neural_net import DeepCFRModel
 
 
+#TODO: Add a way for the roundstate variable to carry betting infor
 
+class LocalPlayer():
 
-class Player(Bot):
-    '''
-    A pokerbot.
-    '''
-
-    def __init__(self):
+    def __init__(self, name, model = None) :
         '''
         Called when a new game starts. Called exactly once.
 
@@ -34,30 +32,17 @@ class Player(Bot):
         Nothing.
         '''
 
-        #Set up dictionary to convert rank to integer
-        self.rank_to_int = dict()
-        for i in range(2,10):
-            self.rank_to_int[str(i)] = i
-
-        for i, j in enumerate(["T", "J", "Q", "K"]):
-            self.rank_to_int[j] = i+10
-
-        self.rank_to_int["A"] = 1
-
-
-        #Set up dictionary to convert suit to integer
-        self.suit_to_int = dict()
-
-        for i, j in enumerate(["d", "c", "h", "s"]):
-            self.suit_to_int[j] = i
+        self.name = name
+        self.bankroll = 0
 
         self.nbets = 10
         self.nactions = 5
 
-        #NOTE: I believe the number of cards types should be four cus [hole, flop, [turn, river]]
-        #but it might indeed be 4
+        self.model = model
 
-        self.model = DeepCFRModel(2, self.nbets, self.nactions)
+        if self.model == None:
+        
+            self.model = DeepCFRModel(4, self.nbets, self.nactions)
 
         self.idx_to_action = dict()
         
@@ -66,7 +51,7 @@ class Player(Bot):
 
         pass
 
-    def handle_new_round(self, game_state, round_state, active):
+    def handle_new_round(self):
         '''
         Called when a new round starts. Called NUM_ROUNDS times.
 
@@ -80,12 +65,6 @@ class Player(Bot):
         '''
 
         self.bets = []
-        #my_bankroll = game_state.bankroll  # the total number of chips you've gained or lost from the beginning of the game to the start of this round
-        #game_clock = game_state.game_clock  # the total number of seconds your bot has left to play this game
-        #round_num = game_state.round_num  # the round number from 1 to NUM_ROUNDS
-        #my_cards = round_state.hands[active]  # your cards
-        #big_blind = bool(active)  # True if you are the big blind
-        #my_bounty = round_state.bounties[active]  # your current bounty rank
         pass
 
     def handle_round_over(self, game_state, terminal_state, active):
@@ -100,6 +79,8 @@ class Player(Bot):
         Returns:
         Nothing.
         '''
+
+        self.bets = []
         #my_delta = terminal_state.deltas[active]  # your bankroll change from this round
         previous_state = terminal_state.previous_state  # RoundState before payoffs
         #street = previous_state.street  # 0, 3, 4, or 5 representing when this round ended
@@ -120,10 +101,7 @@ class Player(Bot):
     
     def get_card_num(self, card):
 
-        card_rank = self.rank_to_int[card[0]]
-        card_suit = self.suit_to_int[card[1]]
-
-        card_num = (card_rank-1) + 13*(card_suit)
+        card_num = (card.rank-1) + 13*(card.suit)
 
         return t.tensor([card_num])
 
@@ -137,8 +115,8 @@ class Player(Bot):
             board_nums.append(-1)
 
         flop_tensor = t.tensor(board_nums[:3]).unsqueeze(0)
-        turn_tensor = t.tensor(board_nums[3]).unsqueeze(0)
-        river_tensor = t.tensor(board_nums[4]).unsqueeze(0)
+        turn_tensor = t.tensor([board_nums[3]]).unsqueeze(0)
+        river_tensor = t.tensor([board_nums[4]]).unsqueeze(0)
 
         return [hole_tensor, flop_tensor, turn_tensor, river_tensor]
 
@@ -177,7 +155,7 @@ class Player(Bot):
         return mask_tensor
 
 
-    def get_action(self, game_state, round_state, active):
+    def get_action(self, round_state, active):
         '''
         Where the magic happens - your code should implement this function.
         Called any time the engine needs an action from your bot.
@@ -207,7 +185,7 @@ class Player(Bot):
         self.pot = my_contribution + opp_contribution
         self.my_stack = my_stack
 
-        print("The bets are: ", self.bets)
+        # print("The bets are: ", self.bets)
 
         if RaiseAction in legal_actions:
            min_raise, max_raise = round_state.raise_bounds() # the smallest and largest numbers of chips for a legal bet/raise
@@ -257,5 +235,4 @@ class Player(Bot):
         return output
 
 
-if __name__ == '__main__':
-    run_bot(Player(), parse_args())
+

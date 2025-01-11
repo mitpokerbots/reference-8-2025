@@ -16,7 +16,7 @@ import os
 import random
 
 sys.path.append(os.getcwd())
-from config import *
+from config import * 
 
 FoldAction = namedtuple('FoldAction', [])
 CallAction = namedtuple('CallAction', [])
