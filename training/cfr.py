@@ -1,13 +1,19 @@
 import random
 import math
+import torch 
 
-import torch as t
+import sys
+import os
 
-from training.local_engine import LocalGame
-from training.local_player import LocalPlayer
-from training.neural_net import DeepCFRModel
-from training.local_player import LocalPlayer
-from engine import RoundState, FoldAction, CheckAction, CallAction, RaiseAction, TerminalState
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+from config import *
+
+from local_engine import LocalGame
+from local_player import LocalPlayer
+from neural_net import DeepCFRModel
+from local_player import LocalPlayer
+from engine import FoldAction, CheckAction, CallAction, RaiseAction, TerminalState
 
 #TODO: Modify the roundstate class such that it also keeps a bet history
 
@@ -36,6 +42,14 @@ class MemoryReservoir:
             replace_index = random.randint(0, self.stream_size - 1)
             if replace_index < self.capacity:
                 self.memory[replace_index] = item
+    
+    def __len__(self):
+        return len(self.memory)
+
+    def __iter__(self):
+        return iter(self.memory)
+    
+
 
 class CFR:
 
@@ -45,7 +59,14 @@ class CFR:
         self.mcc_iters = mcc_iters
         self.round_iters = round_iters
 
+        self.num_epochs = 10
+        self.batch_size = 100
+        self.learning_rate = 0.1
+
         self.game_engine = LocalGame()
+
+        self.nbets = 8
+        self.nactions = 5
 
         self.roundstate_memory = [MemoryReservoir(reservouir_size) for i in [0,1]]
         self.advantage_memory = [MemoryReservoir(reservouir_size) for i in [0,1]]
@@ -58,68 +79,46 @@ class CFR:
     
     def generate_roundstates(self, traverser):
 
-        t = random.randint(0,len(self.advantage_memory)-1)
+        t = random.randint(0,len(self.strategy_memory[0])-1)
 
         if traverser == 0:
-            player_A = LocalPlayer("A", self.strategy_memory[-1])
-            player_B = LocalPlayer("B", self.strategy_memory[t])
+            player_A = LocalPlayer("A", self.strategy_memory[0][-1])
+            player_B = LocalPlayer("B", self.strategy_memory[1][t])
 
         elif traverser == 1:
-            player_A = LocalPlayer("A", self.strategy_memory[t])
-            player_B = LocalPlayer("B", self.strategy_memory[-1])
+            player_A = LocalPlayer("A", self.strategy_memory[0][t])
+            player_B = LocalPlayer("B", self.strategy_memory[1][-1])
 
         players = [player_A, player_B]
 
-        roundstates = self.game_engine.log_round_state(players)
+        bounties = []
+
+        roundstates = self.game_engine.generate_roundstates(players, bounties)
 
         for roundstate in roundstates:
 
             active = roundstate.button%2
 
-            self.round_state_memory[active].add((roundstate, active, t))
-        
-    def tensorize_legal_mask(self, roundstate):
+            self.roundstate_memory[active].add((roundstate, active, t))
 
-        legal_actions = roundstate.legal_actions()
-
-        mask_tensor = t.zeros(self.nactions, dtype=t.float32)
-
-        if FoldAction in legal_actions:
-            mask_tensor[0] = 1
-        
-        if CheckAction in legal_actions:
-            mask_tensor[1] = 1
-        
-        if CallAction in legal_actions:
-            mask_tensor[2] = 1
-        
-        if RaiseAction in legal_actions:
-
-            if self.min_raise <= math.ceil(self.pot*1/2) <= self.max_raise:
-                mask_tensor[3] = 1
-            if self.min_raise <= math.ceil(self.pot*3/2) <= self.max_raise:
-                mask_tensor[4] = 1
-        
-        return mask_tensor
-    
     def infoset_EV(self, roundstate, traverser, t):
 
         if traverser == 0:
-            player_A = LocalPlayer("A", self.strategy_memory[-1])
-            player_B = LocalPlayer("B", self.strategy_memory[t])
+            player_A = LocalPlayer("A", self.strategy_memory[0][-1])
+            player_B = LocalPlayer("B", self.strategy_memory[1][t])
 
         elif traverser == 1:
-            player_A = LocalPlayer("A", self.strategy_memory[t])
-            player_B = LocalPlayer("B", self.strategy_memory[-1])
-        
+            player_A = LocalPlayer("A", self.strategy_memory[0][t])
+            player_B = LocalPlayer("B", self.strategy_memory[1][-1])
+
         players = [player_A, player_B]
         
-        pnls = t.zeros(2)
+        pnls = torch.zeros(2)
 
         for i in range(self.mcc_iters):
 
-            round_pnls = self.game_engine.simulate_round_state(roundstate, players)
-            round_pnls = t.tensor(round_pnls)
+            round_pnls = self.game_engine.simulate_round_state(players, roundstate)
+            round_pnls = torch.tensor(round_pnls)
             pnls += round_pnls
 
         pnls = pnls / self.mcc_iters
@@ -128,7 +127,9 @@ class CFR:
     
     def action_EV(self, roundstate, traverser, t, action):
 
-        if traverser != roundstate.active:
+        active = roundstate.button%2
+
+        if traverser != active:
             raise ValueError("Can not estimate action values for non active player")
 
         new_roundstate = roundstate.proceed(action)
@@ -139,11 +140,15 @@ class CFR:
     
     def regret_tensor(self, roundstate, traverser, t):
 
-        regret_tensor = t.zeros(5)
-        legal_mask = self.tensorize_legal_mask(roundstate)
-        half_pot = RaiseAction(math.ceil(roundstate.pot*1/2))
-        three_half_pot = RaiseAction(math.ceil(roundstate.pot*1/2))
-        action_space = [FoldAction, CheckAction, CallAction, half_pot, three_half_pot]
+        regret_tensor = torch.zeros(5)
+        legal_mask = self.models[traverser].tensorize_mask(roundstate)
+
+        pot = sum([STARTING_STACK - roundstate.stacks[i] for i in [0,1]])
+
+        half_pot = RaiseAction(math.ceil(pot*1/2))
+        three_half_pot = RaiseAction(math.ceil(pot*1/2))
+
+        action_space = [FoldAction(), CheckAction(), CallAction(), half_pot, three_half_pot]
 
         infoset_EV = self.infoset_EV(roundstate, traverser, t)
 
@@ -155,15 +160,15 @@ class CFR:
                 regret_tensor[action_idx] = action_EV - infoset_EV
 
 
-        return roundstate
+        return regret_tensor.unsqueeze(0)
     
     def training_data(self, traverser):
 
-        input_data = []
-        output_data = []
+        data = []
 
-        for i in range(self.round_states):
-            self.generate_roundstates()
+        for i in range(self.round_iters):
+
+            self.generate_roundstates(traverser)
         
         for info in self.roundstate_memory[traverser]:
 
@@ -171,23 +176,107 @@ class CFR:
 
             regret_tensor = self.regret_tensor(roundstate, traverser, t)
 
-            input_data.append(roundstate)
-            output_data.append(regret_tensor) 
+            card_tensor_list, bet_tensor = self.models[traverser].tensorize_roundstate(roundstate, traverser)
 
-        return (input_data, output_data)
+            data.append((card_tensor_list, bet_tensor, regret_tensor))
 
 
-#TODO: Actually make it so that when we get the input/output data we just store 
-# The data in the following set up: (input_tensors, regret_tensor, legal_mask)
-# THis will allow us to train using batching and so on and make things much faster
+        return data
+
+    def batchify(self, data, batch_size):
+
+        inputs_bets = []
+        inputs_cards = [[] for _ in range(4)]
+        regrets = []
     
-    def train_CFR_iter(self):
+        for (cards, bets, regret_vec) in data:
+
+            inputs_bets.append(bets)
+            for j in range(4):
+                inputs_cards[j].append(cards[j])
+            regrets.append(regret_vec)
+        
+        # When we have a full batch, yield the batch
+        if len(inputs_bets) == batch_size:
+            batched_bets = torch.cat(inputs_bets, dim=0)
+            batched_cards = [torch.cat(inputs_cards[j], dim=0) for j in range(4)]
+            batched_regrets = torch.tensor(regrets, torch.float32)
+            
+            yield (batched_bets, batched_cards), batched_regrets
+            
+            # Reset for the next batch
+            inputs_bets = []
+            inputs_cards = [[] for _ in range(4)]
+            regrets = []
+    
+        # Handle remaining data if any
+        if inputs_bets:
+            batched_bets = torch.cat(inputs_bets, dim=0)
+            batched_cards = [torch.cat(inputs_cards[j], dim=0) for j in range(4)]
+            batched_regrets = torch.cat(regrets, dim= 0)
+            yield (batched_cards, batched_bets), batched_regrets
+
+    def train_model(self, traverser):
+
+        new_model = self.generate_model()
+        self.models[traverser] = new_model
+        training_data = self.training_data(traverser)
+
+        criterion = torch.nn.MSELoss()
+        optimizer = torch.optim.Adam(new_model.parameters(), lr=self.learning_rate)
+
+        for epoch in range(self.num_epochs):
+
+            epoch_loss = 0.0
+            optimizer.zero_grad()
+
+            for (batched_cards, batched_bets), mcc_regrets in self.batchify(training_data, self.batch_size):
+
+                predicted_regrets = new_model(batched_cards, batched_bets)
+
+                loss = criterion(predicted_regrets.squeeze(), mcc_regrets)
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
 
 
+            print("---------------------")
+            print("Training model number ", len(self.strategy_memory[0]) + 1)
+            print(f"Epoch {epoch + 1}/{self.num_epochs}, Loss: {epoch_loss:.4f}")
+
+        print("What is the class of the output in train model: ", type(new_model))
+        print("Training complete!")
+        return new_model
+    
+    def run_CFR(self):
+
+        new_models = []
 
         for traverser in [0,1]:
 
-            input_data, output_data = self.training_data(traverser)
+            new_models.append(self.train_model(traverser))
+
+        for i in [0,1]:
+
+            self.advantage_memory.append(self.models[i])
+
+            self.models[i] = new_models[i]
+
+    def CFR_training(self):
+
+        for i in [0,1]:
+            rand_model = self.generate_model()
+            self.strategy_memory[i].append(rand_model)
+        
+        for i in range(self.cfr_iters):
+            self.run_CFR()
+        
+
+            
+
+
+
 
 
 

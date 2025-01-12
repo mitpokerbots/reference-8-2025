@@ -2,8 +2,7 @@
 6.9630 MIT POKERBOTS GAME ENGINE
 DO NOT REMOVE, RENAME, OR EDIT THIS FILE
 '''
-import sys
-import os
+
 import random
 import math
 
@@ -11,7 +10,11 @@ import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
 
-sys.path.append(os.getcwd())
+import sys
+import os
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
 from config import *
 from engine import FoldAction, CallAction, CheckAction, RaiseAction
 from training.neural_net import DeepCFRModel
@@ -98,40 +101,7 @@ class LocalPlayer():
             print("I hit my bounty of " + bounty_rank + "!")
         if opponent_bounty_hit:
             print("Opponent hit their bounty of " + opponent_bounty_rank + "!")
-    
-    def get_card_num(self, card):
-
-        card_num = (card.rank-1) + 13*(card.suit)
-
-        return t.tensor([card_num])
-
-    def tensorize_cards(self, my_hand, board):
-
-        hole_tensor = t.tensor([self.get_card_num(card) for card in my_hand]).unsqueeze(0)
-
-        board_nums = [self.get_card_num(card) for card in board]
-
-        while len(board_nums) < 5:
-            board_nums.append(-1)
-
-        flop_tensor = t.tensor(board_nums[:3]).unsqueeze(0)
-        turn_tensor = t.tensor([board_nums[3]]).unsqueeze(0)
-        river_tensor = t.tensor([board_nums[4]]).unsqueeze(0)
-
-        return [hole_tensor, flop_tensor, turn_tensor, river_tensor]
-
-    def tensorize_bets(self):
-
-        last_bets = self.bets[:][-self.nbets:]
-
-        while len(last_bets) < self.nbets:
-            last_bets.append(-1)
-
-        tensorized_bets = t.tensor(last_bets, dtype=t.float32).unsqueeze(0)
-
-        return tensorized_bets
-    
-    
+        
     def tensorize_mask(self, legal_actions):
 
         mask_tensor = t.zeros(self.nactions, dtype=t.float32)
@@ -168,6 +138,7 @@ class LocalPlayer():
         Returns:
         Your action.
         '''
+        bets = round_state.bets
         legal_actions = round_state.legal_actions()  # the actions you are allowed to take
         street = round_state.street  # 0, 3, 4, or 5 representing pre-flop, flop, turn, or river respectively
         my_cards = round_state.hands[active]  # your cards
@@ -181,23 +152,21 @@ class LocalPlayer():
         my_contribution = STARTING_STACK - my_stack  # the number of chips you have contributed to the pot
         opp_contribution = STARTING_STACK - opp_stack  # the number of chips your opponent has contributed to the pot
 
-        self.bets.append(continue_cost)
         self.pot = my_contribution + opp_contribution
         self.my_stack = my_stack
 
-        # print("The bets are: ", self.bets)
+        raise_bounds = [None, None]
 
         if RaiseAction in legal_actions:
            min_raise, max_raise = round_state.raise_bounds() # the smallest and largest numbers of chips for a legal bet/raise
            self.min_raise = min_raise
            self.max_raise = max_raise 
            min_cost = min_raise - my_pip  # the cost of a minimum bet/raise
-           max_cost = max_raise - my_pip  # the cost of a maximum bet/raise
-
-
-        tensorized_bets = self.tensorize_bets()
-        tensorized_cards = self.tensorize_cards(my_cards, board_cards)
-        mask_tensor = self.tensorize_mask(legal_actions)
+           max_cost = max_raise - my_pip 
+    
+        tensorized_bets = self.model.tensorize_bets(bets)
+        tensorized_cards = self.model.tensorize_cards(my_cards, board_cards)
+        mask_tensor = self.model.tensorize_mask(round_state)
 
         model_regrets = self.model(tensorized_cards, tensorized_bets).squeeze(0)
         model_regrets = F.relu(mask_tensor*model_regrets)
@@ -226,11 +195,6 @@ class LocalPlayer():
         elif selected_action == "Raise 3/2":
             three_half_pot = math.ceil(self.pot*3/2)
             output = RaiseAction(three_half_pot)
-
-        if isinstance(output, RaiseAction):
-            self.bets.append(output.amount - my_pip)
-        else:
-            self.bets.append(0)
 
         return output
 
