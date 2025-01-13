@@ -13,7 +13,7 @@ import random
 import torch as t
 import torch.nn as nn
 import torch.nn.functional as F
-from cfr_training.neural_net import DeepCFRModel
+from training.neural_net import DeepCFRModel
 
 
 

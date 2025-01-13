@@ -166,4 +166,4 @@ class DeepCFRModel(nn.Module):
             if min_raise <= math.ceil(pot*3/2) <= max_raise:
                 mask_tensor[4] = 1
         
-        return mask_tensor
+        return mask_tensor.unsqueeze(0)

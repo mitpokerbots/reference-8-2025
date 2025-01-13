@@ -15,8 +15,13 @@ from neural_net import DeepCFRModel
 from local_player import LocalPlayer
 from engine import FoldAction, CheckAction, CallAction, RaiseAction, TerminalState
 
-#TODO: Modify the roundstate class such that it also keeps a bet history
+#TODO: REWRITE THIS TO BE FASTER. FOR TRAINING IT SHOULD ALL BE ON GPU
+#NOTE: I should spend time analyzing where the most run time is spent
+#TODO: Make some system of tests, and talk abt model logic with zhang
+#NOTE: its hard to tell if there are mistakes since I havent ran it 
+#enough iterations for it to converge
 
+#TODO
 class MemoryReservoir:
 
     def __init__(self, capacity):
@@ -59,8 +64,8 @@ class CFR:
         self.mcc_iters = mcc_iters
         self.round_iters = round_iters
 
-        self.num_epochs = 10
-        self.batch_size = 100
+        self.num_epochs = 25
+        self.batch_size = 27
         self.learning_rate = 0.1
 
         self.game_engine = LocalGame()
@@ -71,7 +76,6 @@ class CFR:
         self.roundstate_memory = [MemoryReservoir(reservouir_size) for i in [0,1]]
         self.advantage_memory = [MemoryReservoir(reservouir_size) for i in [0,1]]
         self.strategy_memory = [[], []]
-        self.models = [None, None]
 
     def generate_model(self):
 
@@ -121,7 +125,7 @@ class CFR:
             round_pnls = torch.tensor(round_pnls)
             pnls += round_pnls
 
-        pnls = pnls / self.mcc_iters
+        pnls = pnls/self.mcc_iters
 
         return pnls[traverser]
     
@@ -140,8 +144,9 @@ class CFR:
     
     def regret_tensor(self, roundstate, traverser, t):
 
+        model = self.strategy_memory[traverser][-1]
         regret_tensor = torch.zeros(5)
-        legal_mask = self.models[traverser].tensorize_mask(roundstate)
+        legal_mask = model.tensorize_mask(roundstate)
 
         pot = sum([STARTING_STACK - roundstate.stacks[i] for i in [0,1]])
 
@@ -154,7 +159,7 @@ class CFR:
 
         for action_idx, action in enumerate(action_space):
 
-            if legal_mask[action_idx] > 0.001:
+            if legal_mask[0][action_idx] > 0.001:
 
                 action_EV = self.action_EV(roundstate, traverser, t, action)
                 regret_tensor[action_idx] = action_EV - infoset_EV
@@ -176,9 +181,10 @@ class CFR:
 
             regret_tensor = self.regret_tensor(roundstate, traverser, t)
 
-            card_tensor_list, bet_tensor = self.models[traverser].tensorize_roundstate(roundstate, traverser)
-
-            data.append((card_tensor_list, bet_tensor, regret_tensor))
+            model = self.strategy_memory[traverser][-1]
+            card_tensor_list, bet_tensor = model.tensorize_roundstate(roundstate, traverser)
+            mask_tensor = model.tensorize_mask(roundstate)
+            data.append((card_tensor_list, bet_tensor, mask_tensor, regret_tensor))
 
 
         return data
@@ -187,39 +193,43 @@ class CFR:
 
         inputs_bets = []
         inputs_cards = [[] for _ in range(4)]
+        masks = []
         regrets = []
     
-        for (cards, bets, regret_vec) in data:
+        for (cards, bets, mask, regret_vec) in data:
 
             inputs_bets.append(bets)
             for j in range(4):
                 inputs_cards[j].append(cards[j])
+            masks.append(mask)
             regrets.append(regret_vec)
         
-        # When we have a full batch, yield the batch
-        if len(inputs_bets) == batch_size:
-            batched_bets = torch.cat(inputs_bets, dim=0)
-            batched_cards = [torch.cat(inputs_cards[j], dim=0) for j in range(4)]
-            batched_regrets = torch.tensor(regrets, torch.float32)
+            # When we have a full batch, yield the batch
+            if len(inputs_bets) == batch_size:
+                batched_bets = torch.cat(inputs_bets, dim=0)
+                batched_cards = [torch.cat(inputs_cards[j], dim=0) for j in range(4)]
+                batched_regrets = torch.cat(regrets, dim=0)
+                batched_masks = torch.cat(masks, dim=0)
             
-            yield (batched_bets, batched_cards), batched_regrets
+                yield batched_cards, batched_bets, batched_masks, batched_regrets
             
-            # Reset for the next batch
-            inputs_bets = []
-            inputs_cards = [[] for _ in range(4)]
-            regrets = []
+                # Reset for the next batch
+                inputs_bets = []
+                inputs_cards = [[] for _ in range(4)]
+                regrets = []
+                masks = []
     
         # Handle remaining data if any
         if inputs_bets:
             batched_bets = torch.cat(inputs_bets, dim=0)
             batched_cards = [torch.cat(inputs_cards[j], dim=0) for j in range(4)]
             batched_regrets = torch.cat(regrets, dim= 0)
-            yield (batched_cards, batched_bets), batched_regrets
+            batched_masks = torch.cat(masks, dim=0)
+            yield batched_cards, batched_bets, batched_masks, batched_regrets
 
     def train_model(self, traverser):
 
         new_model = self.generate_model()
-        self.models[traverser] = new_model
         training_data = self.training_data(traverser)
 
         criterion = torch.nn.MSELoss()
@@ -229,10 +239,22 @@ class CFR:
 
             epoch_loss = 0.0
             optimizer.zero_grad()
+            num_data_pts = 0
 
-            for (batched_cards, batched_bets), mcc_regrets in self.batchify(training_data, self.batch_size):
+            for cards, bets, masks, mcc_regrets in self.batchify(training_data, self.batch_size):
 
-                predicted_regrets = new_model(batched_cards, batched_bets)
+                num_data_pts += mcc_regrets.shape[0]
+
+                predicted_regrets = masks * new_model(cards, bets)
+                mcc_regrets = masks * mcc_regrets
+
+                i = random.randint(0, mcc_regrets.shape[1]-1)
+                pred_regret_vec = predicted_regrets[i]
+                mcc_regret_vec = mcc_regrets[i]
+
+                # print("----------------------")
+                # print("Sample predicted regret is: ", pred_regret_vec)
+                # print("The empirical regret vector is: ", mcc_regret_vec)
 
                 loss = criterion(predicted_regrets.squeeze(), mcc_regrets)
                 loss.backward()
@@ -240,12 +262,11 @@ class CFR:
 
                 epoch_loss += loss.item()
 
+            avg_epoch_loss = epoch_loss/num_data_pts
 
             print("---------------------")
-            print("Training model number ", len(self.strategy_memory[0]) + 1)
-            print(f"Epoch {epoch + 1}/{self.num_epochs}, Loss: {epoch_loss:.4f}")
+            print(f"Epoch {epoch + 1}/{self.num_epochs}, Loss: {epoch_loss:.4f}, Avg Loss: {avg_epoch_loss:.4f}")
 
-        print("What is the class of the output in train model: ", type(new_model))
         print("Training complete!")
         return new_model
     
@@ -255,13 +276,16 @@ class CFR:
 
         for traverser in [0,1]:
 
+            print("TRAINING PLAYER: ", traverser)
             new_models.append(self.train_model(traverser))
 
         for i in [0,1]:
+            
+            self.strategy_memory[i].append(new_models[i])
+        
+        # print("The length of the strategy memories is: ", len(self.strategy_memory[0]))
+        # print("The length of the strategy memories is: ", len(self.strategy_memory[1]))
 
-            self.advantage_memory.append(self.models[i])
-
-            self.models[i] = new_models[i]
 
     def CFR_training(self):
 
@@ -270,7 +294,12 @@ class CFR:
             self.strategy_memory[i].append(rand_model)
         
         for i in range(self.cfr_iters):
+            print("-------------------------")
+            print("BEGIN CFR ITER: ", i)
+            print()
             self.run_CFR()
+        
+        print("The total number of strategies we made was: ", len(self.strategy_memory[0]))
         
 
             

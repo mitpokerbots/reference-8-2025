@@ -166,7 +166,7 @@ class LocalPlayer():
     
         tensorized_bets = self.model.tensorize_bets(bets)
         tensorized_cards = self.model.tensorize_cards(my_cards, board_cards)
-        mask_tensor = self.model.tensorize_mask(round_state)
+        mask_tensor = self.model.tensorize_mask(round_state).squeeze(0)
 
         model_regrets = self.model(tensorized_cards, tensorized_bets).squeeze(0)
         model_regrets = F.relu(mask_tensor*model_regrets)

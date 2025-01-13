@@ -60,15 +60,16 @@ class LocalGame():
         player = players[active]
 
         action = player.get_action(round_state, active) 
-            
-        if action in legal_actions:
+
+        if isinstance(action, tuple(legal_actions)):
+            # print("LEGAL ACTION")
             if isinstance(action, RaiseAction):
                 amount = action.amount
                 min_raise, max_raise = round_state.raise_bounds()
                 if min_raise <= amount <= max_raise:
-                    return action(amount)
+                    return action
             else:
-                return action()
+                return action
             
         return CheckAction() if CheckAction in legal_actions else FoldAction()
 
@@ -117,6 +118,7 @@ class LocalGame():
         round_state = LocalRoundState(0, 0, pips, stacks, hands, deck, bounties, None, [])
         while not isinstance(round_state, TerminalState):
             active = round_state.button % 2
+
             player = players[active]
             action = self.query(players, round_state)
             round_state_log.append(round_state)
